@@ -4,9 +4,12 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 import os
 import PyPDF2
 import pyttsx3
+from gtts import gTTS
 import uuid
 import bcrypt
 from datetime import datetime
+from io import BytesIO
+from pydub import AudioSegment  # For converting MP3 to WAV
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
@@ -36,127 +39,83 @@ class UserFile(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     pdf_filename = db.Column(db.String(100), nullable=False)
     audio_filename = db.Column(db.String(100), nullable=False)
-    pdf_path = db.Column(db.String(200), nullable=False)  # Store PDF path
-    audio_path = db.Column(db.String(200), nullable=False)  # Store audio path
+    pdf_path = db.Column(db.String(200), nullable=False)
+    audio_path = db.Column(db.String(200), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-# File handling
-ALLOWED_EXTENSIONS = {"pdf"}
-
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def get_available_voices(max_voices=5):
-    engine = pyttsx3.init()
-    voices = engine.getProperty("voices")
-    return [(voice.id, voice.name) for voice in voices[:min(max_voices, len(voices))]]
+# Text-to-speech function
+def text_to_speech(text, audio_path, voice_index=0, speed=200, use_gtts=True):
+    try:
+        if use_gtts and os.getenv("RENDER", "false") == "true":  # Use gTTS on Render
+            tts = gTTS(text=text, lang="en")
+            mp3_path = audio_path.replace(".wav", ".mp3")
+            tts.save(mp3_path)
+            # Convert MP3 to WAV
+            audio = AudioSegment.from_mp3(mp3_path)
+            audio.export(audio_path, format="wav")
+            os.remove(mp3_path)
+        else:  # Use pyttsx3 locally
+            engine = pyttsx3.init()
+            voices = engine.getProperty("voices")
+            engine.setProperty("voice", voices[voice_index].id)
+            engine.setProperty("rate", speed)
+            engine.save_to_file(text, audio_path)
+            engine.runAndWait()
+    except Exception as e:
+        print(f"Text-to-speech error: {e}")
+        raise
 
 @app.route("/", methods=["GET", "POST"])
-@login_required
 def index():
-    voices = get_available_voices()
     if request.method == "POST":
-        if "file" not in request.files:
-            flash("No file uploaded", "error")
-            return render_template("index.html", voices=voices, default_speed=200)
-        file = request.files["file"]
-        if file.filename == "":
-            flash("No file selected", "error")
-            return render_template("index.html", voices=voices, default_speed=200)
-        if file and allowed_file(file.filename):
-            voice_id = request.form.get("voice")
-            speed = request.form.get("speed", type=float, default=200.0)
-            filename = file.filename
-            pdf_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        if not current_user.is_authenticated:
+            flash("Please log in to convert files.", "error")
+            return redirect(url_for("login"))
+        file = request.files.get("file")
+        voice_index = int(request.form.get("voice", 0))
+        speed = int(request.form.get("speed", 200))
+        if file and file.filename.endswith(".pdf"):
+            pdf_filename = f"{uuid.uuid4()}_{file.filename}"
+            pdf_path = os.path.join(app.config["UPLOAD_FOLDER"], pdf_filename)
             file.save(pdf_path)
-            try:
-                with open(pdf_path, "rb") as pdf_file:
-                    pdf_reader = PyPDF2.PdfReader(pdf_file)
-                    text = ""
-                    for page in pdf_reader.pages:
-                        extracted = page.extract_text()
-                        if extracted:
-                            text += extracted
-                if not text.strip():
-                    flash("No text could be extracted from the PDF", "error")
-                    return render_template("index.html", voices=voices, default_speed=200)
-                unique_id = str(uuid.uuid4())
-                audio_filename = f"{unique_id}.wav"
-                audio_path = os.path.join(AUDIO_FOLDER, audio_filename)
-                engine = pyttsx3.init()
-                if voice_id:
-                    engine.setProperty("voice", voice_id)
-                engine.setProperty("rate", int(speed))
-                engine.save_to_file(text, audio_path)
-                engine.runAndWait()
-                # Save file history with paths
-                user_file = UserFile(
-                    user_id=current_user.id,
-                    pdf_filename=filename,
-                    audio_filename=audio_filename,
-                    pdf_path=pdf_path,
-                    audio_path=audio_path
-                )
-                db.session.add(user_file)
-                db.session.commit()
-                session["audio_path"] = audio_path
-                session["audio_filename"] = filename.rsplit(".", 1)[0] + ".wav"
-                flash("Audio generated successfully! Click below to download.", "success")
-                return render_template("index.html", voices=voices, default_speed=200, audio_ready=True)
-            except Exception as e:
-                flash(f"Error processing file: {str(e)}", "error")
-                return render_template("index.html", voices=voices, default_speed=200)
-        else:
-            flash("Invalid file type. Please upload a PDF", "error")
-            return render_template("index.html", voices=voices, default_speed=200)
-    return render_template("index.html", voices=voices, default_speed=200)
-
-@app.route("/download")
-@login_required
-def download_audio():
-    if "audio_path" not in session:
-        flash("No audio file available for download", "error")
-        return redirect(url_for("index"))
-    audio_path = session["audio_path"]
-    audio_filename = session["audio_filename"]
-    return send_file(audio_path, as_attachment=True, download_name=audio_filename)
-
-@app.route("/download_file/<int:file_id>/<file_type>")
-@login_required
-def download_file(file_id, file_type):
-    user_file = UserFile.query.get_or_404(file_id)
-    if user_file.user_id != current_user.id:
-        flash("Unauthorized access", "error")
-        return redirect(url_for("dashboard"))
-    if file_type == "pdf":
-        file_path = user_file.pdf_path
-        download_name = user_file.pdf_filename
-    elif file_type == "audio":
-        file_path = user_file.audio_path
-        download_name = user_file.audio_filename
-    else:
-        flash("Invalid file type", "error")
-        return redirect(url_for("dashboard"))
-    if not os.path.exists(file_path):
-        flash("File not found", "error")
-        return redirect(url_for("dashboard"))
-    return send_file(file_path, as_attachment=True, download_name=download_name)
+            # Extract text
+            with open(pdf_path, "rb") as f:
+                pdf = PyPDF2.PdfReader(f)
+                text = "".join(page.extract_text() for page in pdf.pages if page.extract_text())
+            if not text:
+                flash("No text found in PDF.", "error")
+                return redirect(url_for("index"))
+            # Convert to audio
+            audio_filename = f"{uuid.uuid4()}.wav"
+            audio_path = os.path.join(AUDIO_FOLDER, audio_filename)
+            text_to_speech(text, audio_path, voice_index, speed, use_gtts=True)
+            # Save to database
+            user_file = UserFile(
+                user_id=current_user.id,
+                pdf_filename=pdf_filename,
+                audio_filename=audio_filename,
+                pdf_path=pdf_path,
+                audio_path=audio_path
+            )
+            db.session.add(user_file)
+            db.session.commit()
+            return send_file(audio_path, as_attachment=True, download_name=audio_filename)
+        flash("Invalid file format. Please upload a PDF.", "error")
+    return render_template("index.html")
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    if current_user.is_authenticated:
-        return redirect(url_for("dashboard"))
     if request.method == "POST":
         email = request.form.get("email")
         password = request.form.get("password")
         if User.query.filter_by(email=email).first():
-            flash("Email already registered", "error")
-            return render_template("register.html")
-        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+            flash("Email already registered.", "error")
+            return redirect(url_for("register"))
+        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
         user = User(email=email, password=hashed_password)
         db.session.add(user)
         db.session.commit()
@@ -166,30 +125,36 @@ def register():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if current_user.is_authenticated:
-        return redirect(url_for("dashboard"))
     if request.method == "POST":
         email = request.form.get("email")
         password = request.form.get("password")
         user = User.query.filter_by(email=email).first()
-        if user and bcrypt.checkpw(password.encode("utf-8"), user.password.encode("utf-8")):
+        if user and bcrypt.checkpw(password.encode("utf-8"), user.password):
             login_user(user)
-            return redirect(url_for("dashboard"))
-        flash("Invalid email or password", "error")
-        return render_template("login.html")
+            return redirect(url_for("index"))
+        flash("Invalid email or password.", "error")
     return render_template("login.html")
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    files = UserFile.query.filter_by(user_id=current_user.id).all()
+    return render_template("dashboard.html", files=files)
+
+@app.route("/download/<int:file_id>")
+@login_required
+def download(file_id):
+    user_file = UserFile.query.get_or_404(file_id)
+    if user_file.user_id != current_user.id:
+        flash("Unauthorized access.", "error")
+        return redirect(url_for("dashboard"))
+    return send_file(user_file.audio_path, as_attachment=True, download_name=user_file.audio_filename)
 
 @app.route("/logout")
 @login_required
 def logout():
     logout_user()
     return redirect(url_for("login"))
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    files = UserFile.query.filter_by(user_id=current_user.id).order_by(UserFile.created_at.desc()).all()
-    return render_template("dashboard.html", files=files)
 
 if __name__ == "__main__":
     with app.app_context():

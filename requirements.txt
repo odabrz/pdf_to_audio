@@ -17,6 +17,7 @@ itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==2.1.5
 packaging==25.0
+pydub==0.25.1
 PyPDF2==3.0.1
 pypiwin32==223
 pyttsx3==2.98
