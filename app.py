@@ -17,6 +17,10 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 
+# Initialize database
+with app.app_context():
+    db.create_all()
+
 # Directories
 UPLOAD_FOLDER = "uploads"
 AUDIO_FOLDER = "audio"
@@ -36,8 +40,8 @@ class UserFile(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     pdf_filename = db.Column(db.String(100), nullable=False)
     audio_filename = db.Column(db.String(100), nullable=False)
-    pdf_path = db.Column(db.String(200), nullable=False)  # Store PDF path
-    audio_path = db.Column(db.String(200), nullable=False)  # Store audio path
+    pdf_path = db.Column(db.String(200), nullable=False)
+    audio_path = db.Column(db.String(200), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 @login_manager.user_loader
@@ -51,49 +55,58 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def get_available_voices(max_voices=5):
-    engine = pyttsx3.init()
-    voices = engine.getProperty("voices")
-    return [(voice.id, voice.name) for voice in voices[:min(max_voices, len(voices))]]
+    try:
+        engine = pyttsx3.init()
+        voices = engine.getProperty("voices")
+        return [(voice.id, voice.name) for voice in voices[:min(max_voices, len(voices))]]
+    except Exception as e:
+        flash(f"Error loading voices: {str(e)}", "warning")
+        return [(None, "Default Voice")]
 
 @app.route("/", methods=["GET", "POST"])
 @login_required
 def index():
     voices = get_available_voices()
+    default_speed = 200
     if request.method == "POST":
         if "file" not in request.files:
             flash("No file uploaded", "error")
-            return render_template("index.html", voices=voices, default_speed=200)
+            return render_template("index.html", voices=voices, default_speed=default_speed)
         file = request.files["file"]
         if file.filename == "":
             flash("No file selected", "error")
-            return render_template("index.html", voices=voices, default_speed=200)
+            return render_template("index.html", voices=voices, default_speed=default_speed)
         if file and allowed_file(file.filename):
-            voice_id = request.form.get("voice")
-            speed = request.form.get("speed", type=float, default=200.0)
-            filename = file.filename
+            voice_id = request.form.get("voice", None)
+            try:
+                speed = int(request.form.get("speed", default_speed))
+                speed = max(100, min(speed, 300))  # Clamp speed
+            except ValueError:
+                flash("Invalid speed value. Using default.", "error")
+                speed = default_speed
+            filename = f"{uuid.uuid4()}_{file.filename}"  # Unique PDF name
             pdf_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
             file.save(pdf_path)
             try:
                 with open(pdf_path, "rb") as pdf_file:
                     pdf_reader = PyPDF2.PdfReader(pdf_file)
-                    text = ""
-                    for page in pdf_reader.pages:
-                        extracted = page.extract_text()
-                        if extracted:
-                            text += extracted
+                    text = "".join(page.extract_text() or "" for page in pdf_reader.pages)
                 if not text.strip():
                     flash("No text could be extracted from the PDF", "error")
-                    return render_template("index.html", voices=voices, default_speed=200)
+                    return render_template("index.html", voices=voices, default_speed=default_speed)
                 unique_id = str(uuid.uuid4())
                 audio_filename = f"{unique_id}.wav"
                 audio_path = os.path.join(AUDIO_FOLDER, audio_filename)
-                engine = pyttsx3.init()
-                if voice_id:
-                    engine.setProperty("voice", voice_id)
-                engine.setProperty("rate", int(speed))
-                engine.save_to_file(text, audio_path)
-                engine.runAndWait()
-                # Save file history with paths
+                try:
+                    engine = pyttsx3.init()
+                    if voice_id:
+                        engine.setProperty("voice", voice_id)
+                    engine.setProperty("rate", speed)
+                    engine.save_to_file(text, audio_path)
+                    engine.runAndWait()
+                except Exception as e:
+                    flash(f"Error generating audio: {str(e)}", "error")
+                    return render_template("index.html", voices=voices, default_speed=default_speed)
                 user_file = UserFile(
                     user_id=current_user.id,
                     pdf_filename=filename,
@@ -104,16 +117,14 @@ def index():
                 db.session.add(user_file)
                 db.session.commit()
                 session["audio_path"] = audio_path
-                session["audio_filename"] = filename.rsplit(".", 1)[0] + ".wav"
+                session["audio_filename"] = file.filename.rsplit(".", 1)[0] + ".wav"
                 flash("Audio generated successfully! Click below to download.", "success")
-                return render_template("index.html", voices=voices, default_speed=200, audio_ready=True)
+                return render_template("index.html", voices=voices, default_speed=default_speed, audio_ready=True)
             except Exception as e:
                 flash(f"Error processing file: {str(e)}", "error")
-                return render_template("index.html", voices=voices, default_speed=200)
-        else:
-            flash("Invalid file type. Please upload a PDF", "error")
-            return render_template("index.html", voices=voices, default_speed=200)
-    return render_template("index.html", voices=voices, default_speed=200)
+                return render_template("index.html", voices=voices, default_speed=default_speed)
+        flash("Invalid file type. Please upload a PDF", "error")
+    return render_template("index.html", voices=voices, default_speed=default_speed)
 
 @app.route("/download")
 @login_required
@@ -153,10 +164,13 @@ def register():
     if request.method == "POST":
         email = request.form.get("email")
         password = request.form.get("password")
+        if not email or not password:
+            flash("Email and password are required", "error")
+            return render_template("register.html")
         if User.query.filter_by(email=email).first():
             flash("Email already registered", "error")
             return render_template("register.html")
-        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
         user = User(email=email, password=hashed_password)
         db.session.add(user)
         db.session.commit()
@@ -171,18 +185,22 @@ def login():
     if request.method == "POST":
         email = request.form.get("email")
         password = request.form.get("password")
+        if not email or not password:
+            flash("Email and password are required", "error")
+            return render_template("login.html")
         user = User.query.filter_by(email=email).first()
-        if user and bcrypt.checkpw(password.encode("utf-8"), user.password.encode("utf-8")):
+        if user and bcrypt.checkpw(password.encode("utf-8"), user.password):
             login_user(user)
             return redirect(url_for("dashboard"))
         flash("Invalid email or password", "error")
-        return render_template("login.html")
     return render_template("login.html")
 
 @app.route("/logout")
 @login_required
 def logout():
     logout_user()
+    session.pop("audio_path", None)
+    session.pop("audio_filename", None)
     return redirect(url_for("login"))
 
 @app.route("/dashboard")
@@ -192,6 +210,4 @@ def dashboard():
     return render_template("dashboard.html", files=files)
 
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)

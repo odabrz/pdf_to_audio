@@ -1,29 +1,19 @@
-# Use official Python image
 FROM python:3.8-slim
 
-# Install espeak and dependencies
-RUN apt-get update && apt-get install -y \
-    espeak \
-    libespeak-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install espeak for pyttsx3
+RUN apt-get update && apt-get install -y espeak libespeak1 && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Create non-root user
+RUN useradd -m appuser
+USER appuser
+WORKDIR /home/appuser/app
 
-# Copy project files
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+# Copy application
 COPY . .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install gunicorn
-RUN pip install gunicorn
-
-# Expose port
-EXPOSE 8000
-
-# Set environment variable
-ENV FLASK_SECRET_KEY=your-secret-key
-
-# Command to run the app
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+# Run on Render's default port
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "app:app"]
