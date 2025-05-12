@@ -1,4 +1,8 @@
-venv/ 
-__pycache__/ 
-*.pyc 
-uploads/* 
+venv/
+__pycache__/
+*.pyc
+site.db
+test.db
+instance/
+audio/
+uploads/
