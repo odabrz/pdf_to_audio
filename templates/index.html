@@ -10,8 +10,12 @@
 <body>
     <div class="container">
         <div class="card">
-            <div class="card-header">
+            <div class="card-header d-flex justify-content-between align-items-center">
                 <h1 class="mb-0">PDF to Audio Converter</h1>
+                <div>
+                    <a href="{{ url_for('dashboard') }}" class="btn btn-primary me-2">Dashboard</a>
+                    <a href="{{ url_for('logout') }}" class="btn btn-danger">Logout</a>
+                </div>
             </div>
             <div class="card-body">
                 <form method="post" enctype="multipart/form-data">
@@ -28,13 +32,13 @@
                         </select>
                     </div>
                     <div class="mb-4">
-                        <label for="speed" class="form-label">Speech Speed <span class="speed-value" id="speedValue">{{ default_speed }}</span></label>
-                        <input type="range" class="form-range" id="speed" name="speed" min="50" max="400" value="{{ default_speed }}" step="10">
+                        <label for="speed" class="form-label">Speech Speed (words per minute)</label>
+                        <input type="number" class="form-control" id="speed" name="speed" value="{{ default_speed }}" min="100" max="300" required>
                     </div>
                     <button type="submit" class="btn btn-primary w-100">Convert to Audio</button>
                 </form>
                 {% if audio_ready %}
-                    <div class="download-section">
+                    <div class="download-section mt-3">
                         <a href="{{ url_for('download_audio') }}" class="btn btn-success w-100">Download Audio</a>
                     </div>
                 {% endif %}
@@ -50,13 +54,5 @@
             </div>
         </div>
     </div>
-    <script>
-        // Update speed value display in real-time
-        const speedSlider = document.getElementById('speed');
-        const speedValue = document.getElementById('speedValue');
-        speedSlider.addEventListener('input', () => {
-            speedValue.textContent = speedSlider.value;
-        });
-    </script>
 </body>
 </html>
